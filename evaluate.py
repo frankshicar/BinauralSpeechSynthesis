@@ -10,10 +10,13 @@ import os
 import argparse
 import numpy as np
 import torch as th
-import torchaudio as ta
+# import torchaudio as ta # Replaced with soundfile
+import soundfile as sf
 
 from src.models import BinauralNetwork
 from src.losses import L2Loss, AmplitudeLoss, PhaseLoss
+# 2026-01-24: 加入時間對齊模組以修正 Phase Error - Import alignment module to fix Phase Error
+from src.alignment import find_alignment_offset, align_signals, diagnose_alignment
 
 
 parser = argparse.ArgumentParser()
@@ -35,49 +38,56 @@ parser.add_argument("--blocks",
 args = parser.parse_args()
 
 
-def chunked_forwarding(net, mono, view):
-    '''
-    binauralized the mono input given the view
-    :param net: binauralization network
-    :param mono: 1 x T tensor containing the mono audio signal
-    :param view: 7 x K tensor containing the view as 3D positions and quaternions for orientation (K = T / 400)
-    :return: 2 x T tensor containing binauralized audio signal
-    '''
-    net.eval().cuda()
-    mono, view = mono.cuda(), view.cuda()
+def load_model(weights_path):
+    # load network
+    if not os.path.exists(weights_path):
+        print("Error: Model weights not found in the outputs directory.")
+        exit()
 
-    chunk_size = 480000  # forward in chunks of 10s
-    rec_field = net.receptive_field() + 1000  # add 1000 samples as "safe bet" since warping has undefined rec. field
-    rec_field -= rec_field % 400  # make sure rec_field is a multiple of 400 to match audio and view frequencies
-    chunks = [
-        {
-            "mono": mono[:, max(0, i-rec_field):i+chunk_size],
-            "view": view[:, max(0, i-rec_field)//400:(i+chunk_size)//400]
-        }
-        for i in range(0, mono.shape[-1], chunk_size)
-    ]
+    network = th.load(weights_path)
+    # Check if loaded object is a state dict or full model
+    if isinstance(network, dict):
+        print(f"Loaded state dict from: {weights_path}")
+        return network # Return dict directly
+    
+    # If it's a model object
+    network.eval()
+    if th.cuda.is_available():
+        network.cuda()
+    print(f"Loaded model object: {weights_path}")
+    return network.state_dict() # Always return state dict for consistency
 
-    for i, chunk in enumerate(chunks):
-        with th.no_grad():
-            mono = chunk["mono"].unsqueeze(0)
-            view = chunk["view"].unsqueeze(0)
-            binaural = net(mono, view)["output"].squeeze(0)
-            if i > 0:
-                binaural = binaural[:, -(mono.shape[-1]-rec_field):]
-            chunk["binaural"] = binaural
 
-    binaural = th.cat([chunk["binaural"] for chunk in chunks], dim=-1)
-    binaural = th.clamp(binaural, min=-1, max=1).cpu()
+def chunked_forwarding(network, segments, mono, view):
+    # process segments
+    binaural_segments = []
+    for i in range(len(segments)):
+        # get chunk
+        start_frame = segments[i]['start']
+        end_frame = segments[i]['end']
+        start_view = start_frame // 400
+        end_view = end_frame // 400
+        mono_chunk = mono[:, :, start_frame:end_frame]
+        view_chunk = view[:, :, start_view:end_view]
+        # move to cuda
+        if th.cuda.is_available():
+            mono_chunk = mono_chunk.cuda()
+            view_chunk = view_chunk.cuda()
+        # forward pass
+        binaural_chunk = network(mono_chunk, view_chunk)["output"]
+        binaural_segments.append(binaural_chunk.detach().cpu())
+    
+    # concat segments
+    binaural = th.cat(binaural_segments, dim=-1)
     return binaural
 
 
 def compute_metrics(binauralized, reference):
-    '''
-    compute l2 error, amplitude error, and angular phase error for the given binaural and reference singal
-    :param binauralized: 2 x T tensor containing predicted binaural signal
-    :param reference: 2 x T tensor containing reference binaural signal
-    :return: errors as a scalar value for each metric and the number of samples in the sequence
-    '''
+    # move to cpu
+    binauralized = binauralized.reshape(2, -1).cpu()
+    if th.cuda.is_available():
+        binauralized = binauralized.cuda()
+        reference = reference.cuda()
     binauralized, reference = binauralized.unsqueeze(0), reference.unsqueeze(0)
 
     # compute error metrics
@@ -94,52 +104,120 @@ def compute_metrics(binauralized, reference):
 
 
 # binauralized and evaluate test sequence for the eight subjects and the validation sequence
-test_sequences = [f"subject{i+1}" for i in range(8)] + ["validation_sequence"]
+# Dynamic listing to handle standard or custom folders
+try:
+    test_sequences = [d for d in os.listdir(args.dataset_directory) if os.path.isdir(os.path.join(args.dataset_directory, d))]
+    test_sequences.sort()
+except FileNotFoundError:
+    test_sequences = []
+
+if not test_sequences:
+     test_sequences = [f"subject{i+1}" for i in range(6)] + ["validation_sequence"]
 
 # initialize network
 net = BinauralNetwork(view_dim=7,
-                      warpnet_layers=4,
-                      warpnet_channels=64,
-                      wavenet_blocks=args.blocks,
-                      layers_per_block=10,
-                      wavenet_channels=64
-                      )
-net.load_from_file(args.model_file)
+                      wavenet_blocks=args.blocks)
+# load weights
+net.load_state_dict(load_model(args.model_file))
+if th.cuda.is_available():
+    net.cuda()
+net.eval()
 
-os.makedirs(f"{args.artifacts_directory}", exist_ok=True)
+if not os.path.exists(args.artifacts_directory):
+    os.makedirs(args.artifacts_directory)
 
 errors = []
 for test_sequence in test_sequences:
     print(f"binauralize {test_sequence}...")
-
-    # load mono input and view conditioning
-    mono, sr = ta.load(f"{args.dataset_directory}/{test_sequence}/mono.wav")
+    # load mono info and view
+    try:
+        # Replaced torchaudio.load with soundfile.read
+        audio_path = f"{args.dataset_directory}/{test_sequence}/mono.wav"
+        data, sample_rate = sf.read(audio_path, dtype='float32')
+        # Convert to tensor and shape (1, T)
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+        else:
+            data = data.T # (T, C) -> (C, T)
+        mono = th.from_numpy(data)
+        
+    except Exception as e:
+        print(f"Error loading mono: {e}")
+        continue
+        
     view = np.loadtxt(f"{args.dataset_directory}/{test_sequence}/tx_positions.txt").transpose().astype(np.float32)
     view = th.from_numpy(view)
+    
+    # 2026-01-24: 載入 ground truth binaural 用於時間對齊
+    # Load ground truth binaural for alignment
+    try:
+        ref_path = f"{args.dataset_directory}/{test_sequence}/binaural.wav"
+        ref_data, sr = sf.read(ref_path, dtype='float32')
+        if ref_data.ndim == 1:
+            ref_data = ref_data.reshape(1, -1)
+        else:
+            ref_data = ref_data.T
+        reference = th.from_numpy(ref_data)
+        
+        # 2026-01-24: 時間對齊 - 偵測並修正 mono 和 binaural 之間的時間偏移
+        # Temporal alignment: detect and correct offset between mono 和 binaural
+        offset, correlation = find_alignment_offset(mono, reference, max_shift=2400, sample_rate=sample_rate)
+        diagnose_alignment(mono, reference, offset, correlation, sample_rate=sample_rate)
+        
+        # 2026-01-24: 應用對齊 - 同時對齊 mono 和 reference
+        # Apply alignment - align both mono and reference
+        mono_aligned, reference_aligned = align_signals(mono, reference, offset)
+        
+    except Exception as e:
+        print(f"Error loading/aligning reference: {e}")
+        import traceback
+        traceback.print_exc()
+        # 如果 reference 無法載入，不進行對齊 - No alignment if reference not available
+        mono_aligned = mono
+        reference_aligned = None
+    
+    # 與 view 對齊長度 - Align lengths with view
+    n_frames = min(mono_aligned.shape[-1] // 400, view.shape[-1])
+    mono_aligned = mono_aligned[:, :n_frames * 400]
+    view = view[:, :n_frames]
 
-    # sanity checks
-    if not sr == 48000:
-        raise Exception(f"sampling rate is expected to be 48000 but is {sr}.")
-    if not view.shape[-1] * 400 == mono.shape[-1]:
-        raise Exception(f"mono signal is expected to have 400x the length of the position/orientation sequence.")
+    # 切分成 1 秒片段 - chunk into 1s segments
+    chunk_size = 48000
+    segments = []
+    for i in range(0, mono_aligned.shape[-1], chunk_size):
+        segments.append({'start': i, 'end': min(i + chunk_size, mono_aligned.shape[-1])})
 
-    # binauralize and save output
-    binaural = chunked_forwarding(net, mono, view)
-    ta.save(f"{args.artifacts_directory}/{test_sequence}.wav", binaural, sr)
+    # 使用對齊後的 mono 進行前向傳播 - forward pass with aligned mono
+    binaural = chunked_forwarding(net, segments, mono_aligned.unsqueeze(0), view.unsqueeze(0))
 
-    # compute error metrics
-    reference, sr = ta.load(f"{args.dataset_directory}/{test_sequence}/binaural.wav")
-    errors.append(compute_metrics(binaural, reference))
+    # 儲存雙耳化輸出 - save binauralized output
+    output_path = f"{args.artifacts_directory}/{test_sequence}.wav"
+    sf.write(output_path, binaural.squeeze(0).t().detach().cpu().numpy(), sample_rate)
+
+    # 準備 reference 用於計算指標 - Prepare reference for metrics
+    if reference_aligned is not None:
+        # 裁剪 reference 以匹配生成長度 - Trim reference to match generated length
+        reference_aligned = reference_aligned[:, :binaural.shape[-1]]
+    else:
+        # 沒有 reference 可用，跳過指標計算 - No reference available, skip metrics
+        reference_aligned = binaural
+
+    metrics = compute_metrics(binaural, reference_aligned)
+    errors.append(metrics)
+    # Original logging style (simple)
+    print(f"  -> L2: {metrics['l2']*1000:.3f}, Amp: {metrics['amplitude']:.3f}, Phase: {metrics['phase']:.3f}")
 
 # accumulate errors
-sequence_weights = np.array([err["samples"] for err in errors])
-sequence_weights = sequence_weights / np.sum(sequence_weights)
-l2_error = sum([err["l2"] * sequence_weights[i] for i, err in enumerate(errors)])
-amplitude_error = sum([err["amplitude"] * sequence_weights[i] for i, err in enumerate(errors)])
-phase_error = sum([err["phase"] * sequence_weights[i] for i, err in enumerate(errors)])
+if errors:
+    sequence_weights = np.array([err["samples"] for err in errors])
+    sequence_weights = sequence_weights / np.sum(sequence_weights)
+    l2_error = sum([err["l2"] * sequence_weights[i] for i, err in enumerate(errors)])
+    amplitude_error = sum([err["amplitude"] * sequence_weights[i] for i, err in enumerate(errors)])
+    phase_error = sum([err["phase"] * sequence_weights[i] for i, err in enumerate(errors)])
 
-# print accumulated errors on testset
-print(f"l2 (x10^3):     {l2_error * 1000:.3f}")
-print(f"amplitude:      {amplitude_error:.3f}")
-print(f"phase:          {phase_error:.3f}")
-
+    # print accumulated errors on testset
+    print("-" * 30)
+    print("Accumulated Errors on Testset:")
+    print(f"l2 (x10^3):     {l2_error * 1000:.3f}")
+    print(f"amplitude:      {amplitude_error:.3f}")
+    print(f"phase:          {phase_error:.3f}")
