@@ -8,7 +8,7 @@ LICENSE file in the root directory of this source tree.
 
 import numpy as np
 import torch as th
-
+import torchaudio as ta
 
 
 class Net(th.nn.Module):
@@ -36,32 +36,30 @@ class Net(th.nn.Module):
         if self.use_cuda:
             self.cuda()
 
-    def load_from_file(self, model_file):
-        '''
-        load network parameters from model_file
-        :param model_file: file containing the model parameters
-        '''
-        if self.use_cuda:
-            self.cpu()
-
-        states = th.load(model_file)
-        self.load_state_dict(states)
-
-        if self.use_cuda:
-            self.cuda()
-        print(f"Loaded: {model_file}")
-
+    '''
+    load network parameters from model_dir/model_name.suffix.net
+    model_dir: (str) directory where the model should be stored
+    suffix: (str) optional suffix to append to the network name
+    '''
     def load(self, model_dir, suffix=''):
         '''
         load network parameters from model_dir/model_name.suffix.net
         :param model_dir: directory to load the model from
         :param suffix: suffix to append after model name
         '''
+        if self.use_cuda:
+            self.cpu()
+
         if suffix == "":
             fname = f"{model_dir}/{self.model_name}.net"
         else:
             fname = f"{model_dir}/{self.model_name}.{suffix}.net"
-        self.load_from_file(fname)
+
+        states = th.load(fname)
+        self.load_state_dict(states)
+        if self.use_cuda:
+            self.cuda()
+        print("Loaded:", fname)
 
     def num_trainable_parameters(self):
         '''
@@ -162,17 +160,7 @@ class FourierTransform:
         return audio
 
     def _magphase(self, complex_stft):
-        # complex_stft is assumed to be (..., 2) [real, imag]
-        if complex_stft.shape[-1] != 2:
-             # Handle complex tensor if necessary, though strict adherence to return_complex=False should prevent this
-             real = complex_stft.real
-             imag = complex_stft.imag
-        else:
-             real = complex_stft[..., 0]
-             imag = complex_stft[..., 1]
-        
-        mag = th.sqrt(real ** 2 + imag ** 2)
-        phase = th.atan2(imag, real)
+        mag, phase = ta.functional.magphase(complex_stft, 1.0)
         return mag, phase
 
     def stft(self, audio):
@@ -182,9 +170,8 @@ class FourierTransform:
         '''
         hann = th.hann_window(self.win_length)
         hann = hann.cuda() if audio.is_cuda else hann
-        # Enforce return_complex=False to maintain (..., 2) shape compatibility
         spec = th.stft(audio, n_fft=self.fft_bins, hop_length=self.hop_length, win_length=self.win_length,
-                       window=hann, center=not self.causal, normalized=self.normalized, return_complex=False)
+                       window=hann, center=not self.causal, normalized=self.normalized)
         return spec.contiguous()
 
     def complex_spectrogram(self, audio):
@@ -231,8 +218,9 @@ class FourierTransform:
         n_mels: number of bins used for mel scale warping
         return: mel spectrogram as th.Tensor of size channels x n_mels x time_steps for magnitude and phase spectrum
         '''
-        # Removed torchaudio dependency
-        raise NotImplementedError("mel_spectrogram requires torchaudio which is removed for compatibility")
+        spec = self.power_spectrogram(audio)
+        mel_warping = ta.transforms.MelScale(n_mels, self.sample_rate)
+        return mel_warping(spec)
 
     def complex_spec2wav(self, complex_spec, length):
         '''
@@ -243,8 +231,7 @@ class FourierTransform:
         complex_spec = self._convert_format(complex_spec, expected_dims=4)
         hann = th.hann_window(self.win_length)
         hann = hann.cuda() if complex_spec.is_cuda else hann
-        # Replaced ta.functional.istft with th.istft
-        wav = th.istft(complex_spec, n_fft=self.fft_bins, hop_length=self.hop_length, win_length=self.win_length, window=hann, length=length, center=not self.causal, return_complex=False)
+        wav = ta.functional.istft(complex_spec, n_fft=self.fft_bins, hop_length=self.hop_length, win_length=self.win_length, window=hann, length=length, center=not self.causal)
         wav = self._revert_preemphasis(wav)
         return wav
 

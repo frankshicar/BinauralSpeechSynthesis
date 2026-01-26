@@ -12,12 +12,13 @@
 
 import numpy as np
 import torch as th
+from scipy import signal
 
 
 def find_alignment_offset(mono, binaural, max_shift=2400, sample_rate=48000):
     """
-    使用互相關找到 mono 和 binaural 信號之間的時間偏移
-    Find the temporal offset between mono and binaural signals using cross-correlation.
+    使用「振幅包絡 (Amplitude Envelope)」的互相關找到 mono 和 binaural 信號之間的時間偏移
+    Find the temporal offset between mono and binaural signals using cross-correlation of envelopes.
     
     參數 Args:
         mono: Mono 音訊信號，形狀 (1, T) 或 (T,)
@@ -27,9 +28,9 @@ def find_alignment_offset(mono, binaural, max_shift=2400, sample_rate=48000):
     
     回傳 Returns:
         offset: 需要移動的 samples 數（正數 = mono 延遲）
-        correlation: 最大互相關係數
+        correlation: 最大互相關係數 (基於包絡)
     
-    2026-01-24: 創建此函數以診斷 Phase Error 問題
+    2026-01-26: Updated to use Envelope Correlation for robustness against timbre mismatch
     """
     # 轉換為 numpy (如果需要) - Convert to numpy if needed
     if isinstance(mono, th.Tensor):
@@ -52,19 +53,28 @@ def find_alignment_offset(mono, binaural, max_shift=2400, sample_rate=48000):
     mono = mono[:min_len]
     binaural_ref = binaural_ref[:min_len]
     
-    # 正規化信號（零均值、單位方差）- Normalize signals (zero-mean, unit-variance)
-    mono = (mono - np.mean(mono)) / (np.std(mono) + 1e-8)
-    binaural_ref = (binaural_ref - np.mean(binaural_ref)) / (np.std(binaural_ref) + 1e-8)
-    
-    # 使用 FFT 計算互相關（提高效率）- Compute cross-correlation using FFT for efficiency
     # 只使用前 10 秒的信號以加快速度 - Use only first 10 seconds for speed
     max_samples = min(min_len, sample_rate * 10)
     mono_segment = mono[:max_samples]
     binaural_segment = binaural_ref[:max_samples]
+
+    # --- 2026-01-26: 計算振幅包絡 (Amplitude Envelope) ---
+    # 使用 Hilbert Transform 提取包絡，這對音色不同但內容相同的訊號對齊更有效
+    try:
+        mono_envelope = np.abs(signal.hilbert(mono_segment))
+        binaural_envelope = np.abs(signal.hilbert(binaural_segment))
+    except Exception as e:
+        print(f"  [ALIGNMENT] Hilbert transform failed: {e}, falling back to raw signal")
+        mono_envelope = np.abs(mono_segment) # Fallback to rectification
+        binaural_envelope = np.abs(binaural_segment)
+
+    # 正規化包絡（零均值、單位方差）- Normalize envelopes
+    mono_envelope = (mono_envelope - np.mean(mono_envelope)) / (np.std(mono_envelope) + 1e-8)
+    binaural_envelope = (binaural_envelope - np.mean(binaural_envelope)) / (np.std(binaural_envelope) + 1e-8)
     
-    # 透過 FFT 進行互相關 - Cross-correlation via FFT (2026-01-24)
-    from scipy import signal
-    correlation = signal.correlate(binaural_segment, mono_segment, mode='same', method='fft')
+    # 透過 FFT 進行互相關 - Cross-correlation via FFT
+    # Note: We are correlating ENVELOPES now
+    correlation = signal.correlate(binaural_envelope, mono_envelope, mode='same', method='fft')
     
     # 在搜尋範圍內找到最大相關性的 lag - Find the lag with maximum correlation within search range
     center = len(correlation) // 2

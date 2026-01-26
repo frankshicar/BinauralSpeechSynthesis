@@ -6,9 +6,7 @@ This source code is licensed under the license found in the
 LICENSE file in the root directory of this source tree.
 """
 
-import tqdm
-import scipy.io.wavfile as wavfile
-import torch as th
+import torchaudio as ta
 import numpy as np
 
 
@@ -27,33 +25,9 @@ class BinauralDataset:
         super().__init__()
         # load audio data and relative transmitter/receiver position/orientation
         self.mono, self.binaural, self.view = [], [], []
-        pbar = tqdm.tqdm(range(8))
-        for subject_id in pbar:
-            pbar.set_description(f"loading data: subject {subject_id + 1}")
-            sr, mono_np = wavfile.read(f"{dataset_directory}/subject{subject_id + 1}/mono.wav")
-            sr, binaural_np = wavfile.read(f"{dataset_directory}/subject{subject_id + 1}/binaural.wav")
-            
-            # Convert to torch tensor and ensure shape (Channels, Time)
-            # scipy reads as (Time, Channels) or just (Time) if mono
-            if mono_np.ndim == 1:
-                mono_np = mono_np[None, :] # Add channel dim: (1, T)
-            else:
-                mono_np = mono_np.T # (T, C) -> (C, T)
-                
-            if binaural_np.ndim == 1:
-                binaural_np = binaural_np[None, :]
-            else:
-                binaural_np = binaural_np.T
-
-            # Normalize if integer type (scipy reads int16 by default usually)
-            if mono_np.dtype == np.int16:
-                mono_np = mono_np.astype(np.float32) / 32768.0
-            if binaural_np.dtype == np.int16:
-                binaural_np = binaural_np.astype(np.float32) / 32768.0
-
-            mono = th.from_numpy(mono_np)
-            binaural = th.from_numpy(binaural_np)
-
+        for subject_id in range(8):
+            mono, _ = ta.load(f"{dataset_directory}/subject{subject_id + 1}/mono.wav")
+            binaural, _ = ta.load(f"{dataset_directory}/subject{subject_id + 1}/binaural.wav")
             # receiver is fixed at origin in this dataset, so we only need transmitter view
             tx_view = np.loadtxt(f"{dataset_directory}/subject{subject_id + 1}/tx_positions.txt").transpose()
             self.mono.append(mono)
