@@ -7,3 +7,5 @@ KEMAR data/
 results_audio/
 results_audio_variations/
 results_audio_aligned/
+eval_outputs/
+.vscode/

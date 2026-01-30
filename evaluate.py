@@ -16,7 +16,8 @@ import soundfile as sf
 from src.models import BinauralNetwork
 from src.losses import L2Loss, AmplitudeLoss, PhaseLoss, ITDLoss, ILDLoss
 # 2026-01-24: 加入時間對齊模組以修正 Phase Error - Import alignment module to fix Phase Error
-from src.alignment import find_alignment_offset, align_signals, diagnose_alignment
+# 2026-01-28: 新增 align_by_speech_onset 以使用 VAD 對齊
+from src.alignment import find_alignment_offset, align_signals, diagnose_alignment, align_by_speech_onset
 
 
 parser = argparse.ArgumentParser()
@@ -157,17 +158,65 @@ def compute_metrics(binauralized, reference):
     if th.cuda.is_available():
         binauralized = binauralized.cuda()
         reference = reference.cuda()
-    binauralized, reference = binauralized.unsqueeze(0), reference.unsqueeze(0)
+    
+    # ========================================================================
+    # 2026-01-28: 兩階段對齊以修正 Phase Error
+    # 第一階段：VAD 粗對齊（消除大範圍延遲差異）
+    # 第二階段：互相關精細對齊（sample-level 精度）
+    # ========================================================================
+    
+    # 第一階段：VAD 對齊
+    # Stage 1: VAD alignment for coarse alignment
+    binauralized_vad, reference_vad, vad_info = align_by_speech_onset(
+        binauralized, reference, sample_rate=48000, verbose=True
+    )
+    
+    # 第二階段：互相關精細對齊
+    # Stage 2: Cross-correlation for fine-grained alignment
+    offset, corr = find_alignment_offset(binauralized_vad, reference_vad, max_shift=4800)  # 100ms 搜尋範圍
+    binauralized_aligned, reference_aligned = align_signals(binauralized_vad, reference_vad, offset)
+    print(f"  [XCorr] 精細對齊偏移: {offset:+d} samples ({offset/48:.1f}ms), corr={corr:.3f}")
+    
+    # 確保對齊後的信號是正確的形狀
+    # Ensure aligned signals have correct shape
+    if isinstance(binauralized_aligned, th.Tensor):
+        binauralized_aligned = binauralized_aligned.reshape(2, -1)
+        reference_aligned = reference_aligned.reshape(2, -1)
+    else:
+        binauralized_aligned = th.from_numpy(binauralized_aligned).reshape(2, -1)
+        reference_aligned = th.from_numpy(reference_aligned).reshape(2, -1)
+    
+    if th.cuda.is_available():
+        binauralized_aligned = binauralized_aligned.cuda()
+        reference_aligned = reference_aligned.cuda()
+    
+    # 確保 binauralized 和 reference 長度一致（取較短者）
+    # Ensure binauralized and reference have the same length (use shorter one)
+    min_len = min(binauralized.shape[-1], reference.shape[-1])
+    binauralized = binauralized[:, :min_len]
+    reference = reference[:, :min_len]
+    
+    # 增加 batch 維度
+    # Add batch dimension
+    binauralized_batch = binauralized.unsqueeze(0)
+    reference_batch = reference.unsqueeze(0)
+    binauralized_aligned_batch = binauralized_aligned.unsqueeze(0)
+    reference_aligned_batch = reference_aligned.unsqueeze(0)
 
     # 計算誤差指標 Compute error metrics
-    l2_error = L2Loss()(binauralized, reference)
-    amplitude_error = AmplitudeLoss(sample_rate=48000)(binauralized, reference)
-    phase_error = PhaseLoss(sample_rate=48000, ignore_below=0.2)(binauralized, reference)
+    # L2 和 Amplitude 使用長度對齊後的原始信號
+    # L2 and Amplitude use length-aligned original signals
+    l2_error = L2Loss()(binauralized_batch, reference_batch)
+    amplitude_error = AmplitudeLoss(sample_rate=48000)(binauralized_batch, reference_batch)
+    
+    # 2026-01-28: Phase 使用兩階段對齊後的信號
+    # Phase uses two-stage aligned signals
+    phase_error = PhaseLoss(sample_rate=48000, ignore_below=0.2)(binauralized_aligned_batch, reference_aligned_batch)
     
     # 2026-01-25: 新增 ITD 和 ILD 錯誤指標
     # Added ITD (Interaural Time Difference) and ILD (Interaural Level Difference) error metrics
-    itd_error = ITDLoss(sample_rate=48000, max_shift_ms=1.0)(binauralized, reference)
-    ild_error = ILDLoss(sample_rate=48000)(binauralized, reference)
+    itd_error = ITDLoss(sample_rate=48000, max_shift_ms=1.0)(binauralized_batch, reference_batch)
+    ild_error = ILDLoss(sample_rate=48000)(binauralized_batch, reference_batch)
 
     return {
         "l2": l2_error,

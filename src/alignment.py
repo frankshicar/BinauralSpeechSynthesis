@@ -198,3 +198,175 @@ def diagnose_alignment(mono, binaural, offset, correlation, sample_rate=48000):
         'correlation_before': corr_before,
         'correlation_after': correlation
     }
+
+
+# ============================================================================
+# 2026-01-28: 新增 VAD 對齊函數 (Voice Activity Detection Alignment)
+# 用於解決 mono 和 binaural 音訊延遲不匹配導致 Phase Error 過高的問題
+# ============================================================================
+
+def detect_speech_onset(signal, threshold_ratio=0.02, min_duration_ms=10, sample_rate=48000):
+    """
+    使用能量閾值偵測語音的起始點 (2026-01-28)
+    Detect speech onset using energy threshold
+    
+    原理 Principle：
+    1. 計算信號的瞬時能量（滑動視窗 RMS）
+    2. 找到能量超過閾值的第一個點
+    3. 確保該點後有持續的語音活動（避免噪音觸發）
+    
+    參數 Args:
+        signal: 音訊信號，形狀 (C, T) 或 (T,) / Audio signal, shape (C, T) or (T,)
+        threshold_ratio: 能量閾值相對於最大能量的比例（預設 2%）
+                        / Energy threshold as ratio of max energy (default 2%)
+        min_duration_ms: 超過閾值需持續的最小時間（毫秒）
+                        / Minimum duration above threshold (milliseconds)
+        sample_rate: 採樣率 / Sample rate
+    
+    回傳 Returns:
+        onset_sample: 語音起始點的 sample 索引 / Sample index of speech onset
+    """
+    # 轉換為 numpy
+    if isinstance(signal, th.Tensor):
+        signal = signal.cpu().numpy()
+    
+    # 如果是多聲道，取平均（用於能量計算）
+    # If multi-channel, average for energy computation
+    if signal.ndim > 1:
+        signal = np.mean(signal, axis=0)
+    
+    # 計算滑動視窗 RMS 能量（視窗大小：5ms）
+    # Compute sliding window RMS energy (window size: 5ms)
+    window_size = int(sample_rate * 0.005)  # 5ms 視窗
+    if window_size < 1:
+        window_size = 1
+    
+    # 計算平方信號的滑動平均
+    squared = signal ** 2
+    
+    # 使用卷積計算滑動視窗能量
+    # Use convolution for sliding window energy
+    kernel = np.ones(window_size) / window_size
+    energy = np.convolve(squared, kernel, mode='same')
+    
+    # 計算能量閾值（基於整體最大能量）
+    # Compute energy threshold based on max energy
+    max_energy = np.max(energy)
+    threshold = max_energy * threshold_ratio
+    
+    # 找到超過閾值的樣本
+    # Find samples above threshold
+    above_threshold = energy > threshold
+    
+    # 確保持續時間足夠（避免噪音觸發）
+    # Ensure minimum duration (avoid noise triggers)
+    min_samples = int(sample_rate * min_duration_ms / 1000)
+    
+    # 找到第一個連續超過閾值 min_samples 的起點
+    # Find first onset with continuous activity for min_samples
+    onset_sample = 0
+    consecutive_count = 0
+    
+    for i, is_above in enumerate(above_threshold):
+        if is_above:
+            if consecutive_count == 0:
+                candidate_onset = i
+            consecutive_count += 1
+            if consecutive_count >= min_samples:
+                onset_sample = candidate_onset
+                break
+        else:
+            consecutive_count = 0
+    
+    return onset_sample
+
+
+def align_by_speech_onset(pred_signal, ref_signal, sample_rate=48000, verbose=True):
+    """
+    根據語音起始點對齊兩個信號 (2026-01-28)
+    Align signals based on speech onset detection
+    
+    解決的問題 Problem Solved：
+    當 binauralized 和 reference 音訊的靜音開頭長度不同時，
+    直接計算 Phase Error 會因為時間偏移而得到錯誤的高值。
+    此函數找到兩個信號的語音起點，然後裁剪對齊。
+    
+    參數 Args:
+        pred_signal: 預測的雙耳信號 (2, T) / Predicted binaural signal
+        ref_signal: 參考的雙耳信號 (2, T) / Reference binaural signal
+        sample_rate: 採樣率 / Sample rate
+        verbose: 是否輸出診斷資訊 / Whether to print diagnostic info
+    
+    回傳 Returns:
+        aligned_pred: 對齊後的預測信號 / Aligned predicted signal
+        aligned_ref: 對齊後的參考信號 / Aligned reference signal
+        alignment_info: 對齊資訊字典 / Alignment info dictionary
+    """
+    # 偵測語音起始點
+    # Detect speech onset
+    pred_onset = detect_speech_onset(pred_signal, sample_rate=sample_rate)
+    ref_onset = detect_speech_onset(ref_signal, sample_rate=sample_rate)
+    
+    # 計算偏移量（正數 = pred 起始較晚）
+    # Compute offset (positive = pred starts later)
+    offset = pred_onset - ref_onset
+    
+    is_tensor = isinstance(pred_signal, th.Tensor)
+    
+    if is_tensor:
+        device = pred_signal.device
+        pred_np = pred_signal.cpu().numpy()
+        ref_np = ref_signal.cpu().numpy()
+    else:
+        pred_np = pred_signal
+        ref_np = ref_signal
+    
+    # 從較晚的起點開始對齊
+    # Align from the later onset point
+    if offset > 0:
+        # pred 起始較晚，裁剪 pred 的開頭
+        # Pred starts later, trim beginning of pred
+        aligned_pred = pred_np[:, pred_onset:]
+        aligned_ref = ref_np[:, ref_onset:]
+    elif offset < 0:
+        # ref 起始較晚，裁剪 ref 的開頭
+        # Ref starts later, trim beginning of ref
+        aligned_pred = pred_np[:, pred_onset:]
+        aligned_ref = ref_np[:, ref_onset:]
+    else:
+        # 沒有偏移
+        # No offset needed
+        aligned_pred = pred_np
+        aligned_ref = ref_np
+    
+    # 裁剪到相同長度
+    # Trim to same length
+    min_len = min(aligned_pred.shape[-1], aligned_ref.shape[-1])
+    aligned_pred = aligned_pred[:, :min_len]
+    aligned_ref = aligned_ref[:, :min_len]
+    
+    # 轉回張量（如果需要）
+    # Convert back to tensor if needed
+    if is_tensor:
+        aligned_pred = th.from_numpy(aligned_pred).to(device)
+        aligned_ref = th.from_numpy(aligned_ref).to(device)
+    
+    # 輸出診斷資訊
+    # Print diagnostic info
+    if verbose:
+        pred_onset_ms = pred_onset / sample_rate * 1000
+        ref_onset_ms = ref_onset / sample_rate * 1000
+        offset_ms = offset / sample_rate * 1000
+        print(f"  [VAD] 預測語音起點: {pred_onset} samples ({pred_onset_ms:.1f}ms)")
+        print(f"  [VAD] 參考語音起點: {ref_onset} samples ({ref_onset_ms:.1f}ms)")
+        print(f"  [VAD] 應用偏移: {offset:+d} samples ({offset_ms:+.1f}ms)")
+    
+    alignment_info = {
+        'pred_onset': pred_onset,
+        'ref_onset': ref_onset,
+        'offset_samples': offset,
+        'offset_ms': offset / sample_rate * 1000,
+        'aligned_length': min_len
+    }
+    
+    return aligned_pred, aligned_ref, alignment_info
