@@ -258,17 +258,16 @@ class TrainerV4:
         mono, binaural, quats = mono.cuda(), binaural.cuda(), quats.cuda()
         
         # Forward pass
-        prediction = self.net.forward(mono, quats, return_warpfields=True)
+        prediction = self.net.forward(mono, quats)
         
         # Audio losses
         l2 = self.l2_loss(prediction["output"], binaural)
         phase = self.phase_loss(prediction["output"], binaural)
         ipd = self.ipd_loss(prediction["output"], binaural)
         
-        # Warp losses
-        warpfields = prediction["warpfields"]
-        warp_loss = self.warp_loss(warpfields['neural'], warpfields['geometric'])
-        warp_smooth_loss = self.warp_smoothness_loss(warpfields['neural'])
+        # Warp losses (設為 0，因為 BinauralNetwork 不返回 warpfields)
+        warp_loss = 0.0
+        warp_smooth_loss = 0.0
         
         # Intermediate losses
         intermediate_binaural = th.cat([binaural] * len(prediction["intermediate"]), dim=1)
