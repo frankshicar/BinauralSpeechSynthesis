@@ -22,16 +22,41 @@ class BinauralDataset:
     def __init__(self,
                  dataset_directory,
                  chunk_size_ms=200,
-                 overlap=0.5
+                 overlap=0.5,
+                 exclude_subjects=None
                  ):
         super().__init__()
         # load audio data and relative transmitter/receiver position/orientation
         self.mono, self.binaural, self.view = [], [], []
-        pbar = tqdm.tqdm(range(8))
-        for subject_id in pbar:
-            pbar.set_description(f"loading data: subject {subject_id + 1}")
-            sr, mono_np = wavfile.read(f"{dataset_directory}/subject{subject_id + 1}/mono.wav")
-            sr, binaural_np = wavfile.read(f"{dataset_directory}/subject{subject_id + 1}/binaural.wav")
+        
+        # dynamic subject detection
+        import glob
+        import os
+        subject_dirs = sorted(glob.glob(f"{dataset_directory}/subject*"))
+        if not subject_dirs:
+             raise ValueError(f"No subject directories found in {dataset_directory}")
+             
+        pbar = tqdm.tqdm(subject_dirs)
+        
+        if exclude_subjects is None:
+            exclude_subjects = []
+            
+        for subject_path in pbar:
+            subject_name = os.path.basename(subject_path)
+            
+            # Check for exclusion
+            # supports both full name "subject4" or just integer 4
+            if subject_name in exclude_subjects:
+                pbar.set_description(f"Skipping {subject_name}")
+                continue
+            if any(str(sub) in subject_name for sub in exclude_subjects if isinstance(sub, int)):
+                 pbar.set_description(f"Skipping {subject_name}")
+                 continue
+                 
+            pbar.set_description(f"loading data: {subject_name}")
+            
+            sr, mono_np = wavfile.read(f"{subject_path}/mono.wav")
+            sr, binaural_np = wavfile.read(f"{subject_path}/binaural.wav")
             
             # Convert to torch tensor and ensure shape (Channels, Time)
             # scipy reads as (Time, Channels) or just (Time) if mono
@@ -45,17 +70,39 @@ class BinauralDataset:
             else:
                 binaural_np = binaural_np.T
 
-            # Normalize if integer type (scipy reads int16 by default usually)
-            if mono_np.dtype == np.int16:
-                mono_np = mono_np.astype(np.float32) / 32768.0
-            if binaural_np.dtype == np.int16:
-                binaural_np = binaural_np.astype(np.float32) / 32768.0
+            # Normalize if integer type
+            if np.issubdtype(mono_np.dtype, np.integer):
+                if mono_np.dtype == np.int16:
+                    mono_np = mono_np.astype(np.float32) / 32768.0
+                elif mono_np.dtype == np.int32:
+                    mono_np = mono_np.astype(np.float32) / 2147483648.0
+                elif mono_np.dtype == np.uint8:
+                    mono_np = (mono_np.astype(np.float32) - 128) / 128.0
+                else:
+                    # Fallback for other integer types
+                    max_val = np.iinfo(mono_np.dtype).max
+                    mono_np = mono_np.astype(np.float32) / max_val
+            else:
+                mono_np = mono_np.astype(np.float32)
+
+            if np.issubdtype(binaural_np.dtype, np.integer):
+                if binaural_np.dtype == np.int16:
+                    binaural_np = binaural_np.astype(np.float32) / 32768.0
+                elif binaural_np.dtype == np.int32:
+                    binaural_np = binaural_np.astype(np.float32) / 2147483648.0
+                elif binaural_np.dtype == np.uint8:
+                    binaural_np = (binaural_np.astype(np.float32) - 128) / 128.0
+                else:
+                    max_val = np.iinfo(binaural_np.dtype).max
+                    binaural_np = binaural_np.astype(np.float32) / max_val
+            else:
+                binaural_np = binaural_np.astype(np.float32)
 
             mono = th.from_numpy(mono_np)
             binaural = th.from_numpy(binaural_np)
 
             # receiver is fixed at origin in this dataset, so we only need transmitter view
-            tx_view = np.loadtxt(f"{dataset_directory}/subject{subject_id + 1}/tx_positions.txt").transpose()
+            tx_view = np.loadtxt(f"{subject_path}/tx_positions.txt").transpose()
             self.mono.append(mono)
             self.binaural.append(binaural)
             self.view.append(tx_view.astype(np.float32))
@@ -65,7 +112,7 @@ class BinauralDataset:
             self.chunk_size = self.chunk_size + 400 - self.chunk_size % 400
         # compute chunks
         self.chunks = []
-        for subject_id in range(8):
+        for subject_id in range(len(self.mono)):
             last_chunk_start_frame = self.mono[subject_id].shape[-1] - self.chunk_size + 1
             hop_length = int((1 - overlap) * self.chunk_size)
             for offset in range(0, last_chunk_start_frame, hop_length):

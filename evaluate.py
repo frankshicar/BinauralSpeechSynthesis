@@ -136,7 +136,7 @@ def chunked_forwarding(net, mono, view):
     return binaural
 
 
-def compute_metrics(binauralized, reference):
+def compute_metrics(binauralized, reference, ground_truth_angle=None):
     """
     計算評估指標 (Compute evaluation metrics)
     
@@ -159,37 +159,6 @@ def compute_metrics(binauralized, reference):
         binauralized = binauralized.cuda()
         reference = reference.cuda()
     
-    # ========================================================================
-    # 2026-01-28: 兩階段對齊以修正 Phase Error
-    # 第一階段：VAD 粗對齊（消除大範圍延遲差異）
-    # 第二階段：互相關精細對齊（sample-level 精度）
-    # ========================================================================
-    
-    # 第一階段：VAD 對齊
-    # Stage 1: VAD alignment for coarse alignment
-    binauralized_vad, reference_vad, vad_info = align_by_speech_onset(
-        binauralized, reference, sample_rate=48000, verbose=True
-    )
-    
-    # 第二階段：互相關精細對齊
-    # Stage 2: Cross-correlation for fine-grained alignment
-    offset, corr = find_alignment_offset(binauralized_vad, reference_vad, max_shift=4800)  # 100ms 搜尋範圍
-    binauralized_aligned, reference_aligned = align_signals(binauralized_vad, reference_vad, offset)
-    print(f"  [XCorr] 精細對齊偏移: {offset:+d} samples ({offset/48:.1f}ms), corr={corr:.3f}")
-    
-    # 確保對齊後的信號是正確的形狀
-    # Ensure aligned signals have correct shape
-    if isinstance(binauralized_aligned, th.Tensor):
-        binauralized_aligned = binauralized_aligned.reshape(2, -1)
-        reference_aligned = reference_aligned.reshape(2, -1)
-    else:
-        binauralized_aligned = th.from_numpy(binauralized_aligned).reshape(2, -1)
-        reference_aligned = th.from_numpy(reference_aligned).reshape(2, -1)
-    
-    if th.cuda.is_available():
-        binauralized_aligned = binauralized_aligned.cuda()
-        reference_aligned = reference_aligned.cuda()
-    
     # 確保 binauralized 和 reference 長度一致（取較短者）
     # Ensure binauralized and reference have the same length (use shorter one)
     min_len = min(binauralized.shape[-1], reference.shape[-1])
@@ -200,8 +169,6 @@ def compute_metrics(binauralized, reference):
     # Add batch dimension
     binauralized_batch = binauralized.unsqueeze(0)
     reference_batch = reference.unsqueeze(0)
-    binauralized_aligned_batch = binauralized_aligned.unsqueeze(0)
-    reference_aligned_batch = reference_aligned.unsqueeze(0)
 
     # 計算誤差指標 Compute error metrics
     # L2 和 Amplitude 使用長度對齊後的原始信號
@@ -209,14 +176,48 @@ def compute_metrics(binauralized, reference):
     l2_error = L2Loss()(binauralized_batch, reference_batch)
     amplitude_error = AmplitudeLoss(sample_rate=48000)(binauralized_batch, reference_batch)
     
-    # 2026-01-28: Phase 使用兩階段對齊後的信號
-    # Phase uses two-stage aligned signals
-    phase_error = PhaseLoss(sample_rate=48000, ignore_below=0.2)(binauralized_aligned_batch, reference_aligned_batch)
+    # Phase 使用原始信號
+    phase_error = PhaseLoss(sample_rate=48000, ignore_below=0.2)(binauralized_batch, reference_batch)
     
     # 2026-01-25: 新增 ITD 和 ILD 錯誤指標
     # Added ITD (Interaural Time Difference) and ILD (Interaural Level Difference) error metrics
     itd_error = ITDLoss(sample_rate=48000, max_shift_ms=1.0)(binauralized_batch, reference_batch)
     ild_error = ILDLoss(sample_rate=48000)(binauralized_batch, reference_batch)
+
+    # 新增 Angular Error 指標，使用 GCC-PHAT 估計角度
+    angular_error = None
+    pred_angle = None
+    if ground_truth_angle is not None:
+        from src.doa import gcc_phat_estimate
+        try:
+            audio_np = binauralized.cpu().numpy()
+            if audio_np.shape[0] != 2:
+                audio_np = audio_np.T 
+            
+            left_channel = audio_np[0, :]
+            right_channel = audio_np[1, :]
+            
+            valid_indices = np.where(np.abs(left_channel) > 1e-4)[0]
+            if len(valid_indices) > 0:
+                valid_len = valid_indices[-1] + 1
+                valid_len = int(valid_len * 0.95) 
+                left_channel = left_channel[:valid_len]
+                right_channel = right_channel[:valid_len]
+
+            trimmed_binaural = np.stack([left_channel, right_channel])
+            pred_angle = gcc_phat_estimate(trimmed_binaural, sample_rate=48000)
+            
+            # 反轉角度符號以匹配訓練時的坐標系定義（Y+ 為右方 / Y- 為左方）
+            # Invert the angle sign to match the coordinate system definition
+            if pred_angle is not None:
+                pred_angle = -pred_angle
+            
+            error = abs(pred_angle - ground_truth_angle)
+            error = min(error, 360.0 - error)
+            angular_error = error
+        except Exception as e:
+            print(f"    [Warning] Angular error computation failed: {e}")
+            angular_error = None
 
     return {
         "l2": l2_error,
@@ -224,6 +225,9 @@ def compute_metrics(binauralized, reference):
         "phase": phase_error,
         "itd": itd_error,
         "ild": ild_error,
+        "angular_error": angular_error,
+        "predicted_angle": pred_angle,
+        "ground_truth_angle": ground_truth_angle,
         "samples": binauralized.shape[-1]
     }
 
@@ -246,11 +250,21 @@ except FileNotFoundError:
 if not test_sequences:
     test_sequences = [f"subject{i+1}" for i in range(6)] + ["validation_sequence"]
 
+SUBJECT_ANGLES = {
+    'subject1': -90.0,
+    'subject2': -60.0,
+    'subject3': -30.0,
+    'subject4': 0.0,
+    'subject5': 30.0,
+    'subject6': 60.0,
+    'subject7': 90.0,
+}
+
 # initialize network
 net = BinauralNetwork(view_dim=7,
                       wavenet_blocks=args.blocks)
 # load weights
-net.load_state_dict(load_model(args.model_file))
+net.load_state_dict(load_model(args.model_file), strict=False)
 if th.cuda.is_available():
     net.cuda()
 net.eval()
@@ -303,13 +317,20 @@ for test_sequence in test_sequences:
         reference = None
     
     # ========================================================================
-    # 3. 對齊長度 (Align lengths)
+    # 3. 對齊長度 (Align lengths - Use Padding)
     # ========================================================================
-    # 確保 mono 和 view 的長度匹配 (Ensure mono and view lengths match)
-    # view 的時間解析度是 mono 的 1/400 (view temporal resolution is 1/400 of mono)
-    n_frames = min(mono.shape[-1] // 400, view.shape[-1])
-    mono = mono[:, :n_frames * 400]
-    view = view[:, :n_frames]
+    target_frames = view.shape[-1]
+    target_samples = target_frames * 400
+    
+    original_mono_len = mono.shape[-1]
+    
+    if mono.shape[-1] < target_samples:
+        padding_samples = target_samples - mono.shape[-1]
+        print(f"  [Padding] Mono ({mono.shape[-1]}) < View ({target_samples}) -> Padding {padding_samples} samples")
+        mono = th.nn.functional.pad(mono, (0, padding_samples))
+    elif mono.shape[-1] > target_samples:
+        print(f"  [Truncation] Mono ({mono.shape[-1]}) > View ({target_samples}) -> Truncating to {target_samples} samples")
+        mono = mono[:, :target_samples]
 
     # ========================================================================
     # 4. 雙耳化處理 (Binauralization)
@@ -317,6 +338,9 @@ for test_sequence in test_sequences:
     # 使用改進的 chunked_forwarding（已修復噪音問題）
     # Use improved chunked_forwarding (noise issue fixed)
     binaural = chunked_forwarding(net, mono, view)
+    
+    # 移除剛剛補上的 Padding，避免後半段神經網路生成的無聲噪音污染 GCC-PHAT 結果
+    binaural = binaural[:, :original_mono_len]
 
     # ========================================================================
     # 5. 儲存輸出 (Save output)
@@ -331,16 +355,26 @@ for test_sequence in test_sequences:
         # 裁剪 reference 以匹配生成長度 (Trim reference to match generated length)
         reference = reference[:, :binaural.shape[-1]]
         
+        gt_angle = SUBJECT_ANGLES.get(test_sequence, None)
         # 計算指標 (Compute metrics)
-        metrics = compute_metrics(binaural, reference)
+        metrics = compute_metrics(binaural, reference, ground_truth_angle=gt_angle)
+        metrics['test_sequence'] = test_sequence
         errors.append(metrics)
         
         # 輸出指標 (Print metrics)
-        print(f"  -> L2: {metrics['l2']*1000:.3f}, "
-              f"Amp: {metrics['amplitude']:.3f}, "
-              f"Phase: {metrics['phase']:.3f}, "
-              f"ITD: {metrics['itd']:.1f}μs, "
-              f"ILD: {metrics['ild']:.2f}dB")
+        if metrics['angular_error'] is not None:
+            print(f"  -> L2: {metrics['l2']*1000:.3f}, "
+                  f"Amp: {metrics['amplitude']:.3f}, "
+                  f"Phase: {metrics['phase']:.3f}, "
+                  f"ITD: {metrics['itd']:.1f}μs, "
+                  f"ILD: {metrics['ild']:.2f}dB, "
+                  f"Angle Error: {metrics['angular_error']:.1f}° (Pred: {metrics['predicted_angle']:.1f}°, GT: {metrics['ground_truth_angle']:.1f}°)")
+        else:
+            print(f"  -> L2: {metrics['l2']*1000:.3f}, "
+                  f"Amp: {metrics['amplitude']:.3f}, "
+                  f"Phase: {metrics['phase']:.3f}, "
+                  f"ITD: {metrics['itd']:.1f}μs, "
+                  f"ILD: {metrics['ild']:.2f}dB")
 
 # ============================================================================
 # 累積誤差計算與輸出 (Accumulate errors and print results)
@@ -361,6 +395,17 @@ if errors:
     ild_error = sum([err["ild"] * sequence_weights[i] for i, err in enumerate(errors)])
 
     # 輸出測試集的累積誤差 (Print accumulated errors on testset)
+    print("-" * 60)
+    print(f"{'Subject':<10} {'GT 角度':<10} {'預測角度':<10} {'誤差':<10} {'ITD 誤差':<10}")
+    for err in errors:
+        if err['angular_error'] is not None:
+            subj = err.get('test_sequence', 'unknown')
+            gt = f"{err['ground_truth_angle']:+.0f}°".replace('+0°', '0°').replace('-0°', '0°')
+            pred = f"{err['predicted_angle']:+.1f}°"
+            ang_err = f"{err['angular_error']:.1f}°"
+            itd = f"{err['itd']:.1f}μs"
+            print(f"{subj:<10} {gt:<10} {pred:<10} {ang_err:<10} {itd:<10}")
+
     print("-" * 60)
     print("測試集累積誤差 (Accumulated Errors on Testset):")
     print("-" * 60)

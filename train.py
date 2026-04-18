@@ -33,6 +33,10 @@ parser.add_argument("--blocks",
                     type=int,
                     default=3,
                     help="WaveNet 的 block 數量 (number of wavenet blocks, 3=large model, 1=small model)")
+parser.add_argument("--resume",
+                    type=str,
+                    default=None,
+                    help="從 checkpoint 繼續訓練 (resume training from checkpoint, e.g., 'epoch-10')")
 args = parser.parse_args()
 
 # ============================================================================
@@ -42,10 +46,12 @@ config = {
     "artifacts_dir": args.artifacts_directory,  # 輸出目錄 (Output directory)
     "learning_rate": 0.001,                     # 學習率 (Learning rate)
     "newbob_decay": 0.5,                        # NewBob 學習率衰減因子 (NewBob lr decay factor)
-    "newbob_max_decay": 0.01,                   # 最大衰減值 (Maximum decay value)
+    "newbob_max_decay": 0.1,                    # 最大衰減值 (Maximum decay value, 改為 0.1 避免 lr 下降太快)
     "batch_size": 32,                           # 批次大小 (Batch size)
     "mask_beginning": 1024,                     # 遮罩開頭的樣本數 (Mask beginning samples in loss)
-    "loss_weights": {"l2": 1.0, "phase": 0.01}, # 損失函數權重 (Loss weights: L2=1.0, Phase=0.01)
+    "loss_weights": {"l2": 1.0, "phase": 0.01, "ipd": 0.1}, # 損失函數權重 (降低 IPD 權重到 0.1)
+    "lambda_warp": 0.01,                        # Warp loss 權重 (懲罰 neural warp 偏離 geometric warp)
+    "lambda_smooth": 0.001,                     # Warp smoothness loss 權重 (懲罰 warpfield 不平滑)
     "save_frequency": 10,                       # 每 N 個 epoch 保存一次 (Save every N epochs)
     "epochs": 100,                              # 總訓練輪數 (Total training epochs)
     "num_gpus": args.num_gpus,                  # GPU 數量 (Number of GPUs)
@@ -85,6 +91,7 @@ print(f"可訓練參數數量 (Trainable parameters): {net.num_trainable_paramet
 # ============================================================================
 # 開始訓練 (Start Training)
 # ============================================================================
-trainer = Trainer(config, net, dataset)
+# 將 resume 參數傳遞給 Trainer
+trainer = Trainer(config, net, dataset, resume_from=args.resume)
 trainer.train()
 

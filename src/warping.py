@@ -23,8 +23,8 @@ class TimeWarperFunction(th.autograd.Function):
         '''
         ctx.save_for_backward(input, warpfield)
         # compute index list to lookup warped input values
-        idx_left = warpfield.floor().type(th.long)
-        idx_right = th.clamp(warpfield.ceil().type(th.long), max=input.shape[-1]-1)
+        idx_left = th.clamp(warpfield.floor().type(th.long), min=0, max=input.shape[-1]-1)
+        idx_right = th.clamp(warpfield.ceil().type(th.long), min=0, max=input.shape[-1]-1)
         # compute weight for linear interpolation
         alpha = warpfield - warpfield.floor()
         # linear interpolation
@@ -35,8 +35,8 @@ class TimeWarperFunction(th.autograd.Function):
     def backward(ctx, grad_output):
         input, warpfield = ctx.saved_tensors
         # compute index list to lookup warped input values
-        idx_left = warpfield.floor().type(th.long)
-        idx_right = th.clamp(warpfield.ceil().type(th.long), max=input.shape[-1]-1)
+        idx_left = th.clamp(warpfield.floor().type(th.long), min=0, max=input.shape[-1]-1)
+        idx_right = th.clamp(warpfield.ceil().type(th.long), min=0, max=input.shape[-1]-1)
         # warpfield gradient
         grad_warpfield = th.gather(input, 2, idx_right) - th.gather(input, 2, idx_left)
         grad_warpfield = grad_output * grad_warpfield
@@ -94,9 +94,19 @@ class GeometricTimeWarper(TimeWarper):
         self.sampling_rate = sampling_rate
 
     def displacements2warpfield(self, displacements, seq_length):
-        distance = th.sum(displacements**2, dim=2) ** 0.5
-        distance = F.interpolate(distance, size=seq_length)
-        warpfield = -distance / 343.0 * self.sampling_rate
+        """
+        計算 geometric warpfield
+        :param displacements: B x 2 x 3 x K (2 for left/right ear, 3 for xyz)
+        :param seq_length: target sequence length T
+        :return: warpfield as B x 2 x T (separate for left/right ear)
+        """
+        # 計算左右耳各自到 source 的距離
+        # displacements shape: B x 2 x 3 x K
+        distance = th.sum(displacements**2, dim=2) ** 0.5  # B x 2 x K
+        distance = F.interpolate(distance, size=seq_length)  # B x 2 x T
+        # 轉換為時間延遲（負值表示延遲）
+        # distance / speed_of_sound * sampling_rate = delay in samples
+        warpfield = -distance / 343.0 * self.sampling_rate  # B x 2 x T
         return warpfield
 
     def forward(self, input, displacements):

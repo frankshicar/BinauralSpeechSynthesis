@@ -321,21 +321,11 @@ def align_by_speech_onset(pred_signal, ref_signal, sample_rate=48000, verbose=Tr
         pred_np = pred_signal
         ref_np = ref_signal
     
-    # 從較晚的起點開始對齊
-    # Align from the later onset point
-    if offset > 0:
-        # pred 起始較晚，裁剪 pred 的開頭
-        # Pred starts later, trim beginning of pred
-        aligned_pred = pred_np[:, pred_onset:]
-        aligned_ref = ref_np[:, ref_onset:]
-    elif offset < 0:
-        # ref 起始較晚，裁剪 ref 的開頭
-        # Ref starts later, trim beginning of ref
+    # Trim each signal from its own speech onset
+    if offset != 0:
         aligned_pred = pred_np[:, pred_onset:]
         aligned_ref = ref_np[:, ref_onset:]
     else:
-        # 沒有偏移
-        # No offset needed
         aligned_pred = pred_np
         aligned_ref = ref_np
     

@@ -1,11 +1,22 @@
 training_log.txt
 dataset/
 outputs/
+outputs_*/
+outputs_v*/
 pod.yaml
 dataset_original/
-KEMAR data/
-results_audio/
-results_audio_variations/
-results_audio_aligned/
-eval_outputs/
+eval_results/
+logs/
 .vscode/
+__pycache__/
+*.pyc
+*.wav
+*.log
+*.txt
+*.net
+*.pth
+nohup.out
+!README.md
+!requirements.txt
+!docs/*.md
+!實驗記錄/*.md

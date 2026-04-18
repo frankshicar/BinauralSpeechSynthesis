@@ -24,6 +24,9 @@ class Net(th.nn.Module):
         :param model_dir: directory to save the model to
         :param suffix: suffix to append after model name
         '''
+        import os
+        os.makedirs(model_dir, exist_ok=True)
+        
         if self.use_cuda:
             self.cpu()
 
@@ -32,7 +35,12 @@ class Net(th.nn.Module):
         else:
             fname = f"{model_dir}/{self.model_name}.{suffix}.net"
 
-        th.save(self.state_dict(), fname)
+        # Handle DataParallel wrapper
+        state_dict = self.state_dict()
+        if isinstance(self, th.nn.DataParallel):
+            state_dict = self.module.state_dict()
+        
+        th.save(state_dict, fname)
         if self.use_cuda:
             self.cuda()
 
@@ -243,8 +251,9 @@ class FourierTransform:
         complex_spec = self._convert_format(complex_spec, expected_dims=4)
         hann = th.hann_window(self.win_length)
         hann = hann.cuda() if complex_spec.is_cuda else hann
-        # Replaced ta.functional.istft with th.istft
-        wav = th.istft(complex_spec, n_fft=self.fft_bins, hop_length=self.hop_length, win_length=self.win_length, window=hann, length=length, center=not self.causal, return_complex=False)
+        # th.istft expects a complex tensor; convert (... x 2) real/imag to complex
+        complex_spec_c = th.view_as_complex(complex_spec.contiguous())
+        wav = th.istft(complex_spec_c, n_fft=self.fft_bins, hop_length=self.hop_length, win_length=self.win_length, window=hann, length=length, center=not self.causal)
         wav = self._revert_preemphasis(wav)
         return wav
 
