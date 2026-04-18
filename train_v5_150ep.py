@@ -21,7 +21,7 @@ args = parser.parse_args()
 config = {
     "artifacts_dir": args.artifacts_directory,
     "learning_rate": 0.001,
-    "batch_size": 16,
+    "batch_size": 32,  # 提高到 32 (原始論文配置)，加速 2x
     "mask_beginning": 1024,
     "save_frequency": 10,
     "epochs": 150,  # 增加到 150 epochs

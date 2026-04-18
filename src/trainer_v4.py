@@ -27,7 +27,7 @@ class TrainerV4:
             dataset, 
             batch_size=config["batch_size"], 
             shuffle=True, 
-            num_workers=8, 
+            num_workers=16,  # 提高到 16，改善 I/O 
             pin_memory=True
         )
         
