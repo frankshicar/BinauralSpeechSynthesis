@@ -102,7 +102,7 @@ class GeometricTimeWarper(TimeWarper):
         """
         # 計算左右耳各自到 source 的距離
         # displacements shape: B x 2 x 3 x K
-        distance = th.sum(displacements**2, dim=2) ** 0.5  # B x 2 x K
+        distance = th.sqrt(th.sum(displacements**2, dim=2) + 1e-8)  # B x 2 x K (stable gradient)
         distance = F.interpolate(distance, size=seq_length)  # B x 2 x T
         # 轉換為時間延遲（負值表示延遲）
         # distance / speed_of_sound * sampling_rate = delay in samples

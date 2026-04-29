@@ -63,8 +63,8 @@ class AmplitudeLoss(Loss):
         :return: a scalar loss value
         '''
         data, target = self._transform(data), self._transform(target)
-        data = th.sum(data**2, dim=-1) ** 0.5
-        target = th.sum(target**2, dim=-1) ** 0.5
+        data = th.sqrt(th.sum(data**2, dim=-1).clamp(min=1e-12))
+        target = th.sqrt(th.sum(target**2, dim=-1).clamp(min=1e-12))
         return th.mean(th.abs(data - target))
 
 
@@ -94,6 +94,11 @@ class PhaseLoss(Loss):
         target_mask = target_energy > self.ignore_below * th.mean(target_energy)
         pred_mask = pred_energy > self.ignore_below * th.mean(target_energy)
         indices = th.nonzero(target_mask * pred_mask).view(-1)
+        
+        # Guard against silent input
+        if indices.numel() == 0:
+            return th.tensor(0.0, device=data.device)
+        
         data, target = th.index_select(data, 0, indices), th.index_select(target, 0, indices)
         # compute actual phase loss in angular space
         data_angles, target_angles = th.atan2(data[:, 1], data[:, 0]), th.atan2(target[:, 1], target[:, 0])
@@ -177,6 +182,37 @@ class IPDLoss(Loss):
         ipd_diff = np.pi - th.abs(ipd_diff - np.pi)
         
         return th.mean(ipd_diff)
+
+
+class DifferentiableITDLoss(Loss):
+    """
+    可微分的 ITD loss，用頻域 GCC-PHAT 相位比較，不使用 argmax。
+    梯度可以流回 Warpnet 的 warpfield，直接監督 ITD 學習。
+    """
+    def _loss(self, data, target):
+        # data, target: B × 2 × T
+        T = data.shape[-1]
+        pred_L   = th.fft.rfft(data[:, 0, :])    # B × F
+        pred_R   = th.fft.rfft(data[:, 1, :])
+        tgt_L    = th.fft.rfft(target[:, 0, :])
+        tgt_R    = th.fft.rfft(target[:, 1, :])
+
+        # GCC-PHAT cross-spectrum（只保留相位）
+        pred_cross  = pred_L * pred_R.conj()
+        tgt_cross   = tgt_L  * tgt_R.conj()
+        pred_cross  = pred_cross  / (pred_cross.abs()  + 1e-8)
+        tgt_cross   = tgt_cross   / (tgt_cross.abs()   + 1e-8)
+
+        # 只用低頻段（ITD 主要在低頻有效，< 1500 Hz）
+        # 48000 Hz, rfft bins = T//2+1, 1500 Hz ≈ bin 1500*T/48000
+        cutoff = max(1, int(1500 * T / 48000))
+        pred_cross = pred_cross[:, :cutoff]
+        tgt_cross  = tgt_cross[:, :cutoff]
+
+        # 相位差誤差（處理週期性）
+        phase_diff = th.angle(pred_cross) - th.angle(tgt_cross)
+        phase_diff = th.atan2(th.sin(phase_diff), th.cos(phase_diff))
+        return th.mean(phase_diff ** 2)
 
 
 class AngularError(PhaseLoss):

@@ -1,0 +1,47 @@
+{
+  "start_time": "2026-04-23 09:36:49",
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "epochs": 180,
+  "lr_scheduler": {
+    "type": "CosineAnnealingWarmRestarts",
+    "T_0": 70,
+    "T_mult": 1,
+    "eta_min": 5e-06
+  },
+  "training_stages": {
+    "stage1": {
+      "epochs": [
+        0,
+        70
+      ],
+      "loss_weights": {
+        "l2": 10.0,
+        "phase": 0.0,
+        "ipd": 0.0
+      }
+    },
+    "stage2": {
+      "epochs": [
+        70,
+        140
+      ],
+      "loss_weights": {
+        "l2": 10.0,
+        "phase": 0.15,
+        "ipd": 0.3
+      }
+    },
+    "stage3": {
+      "epochs": [
+        140,
+        180
+      ],
+      "loss_weights": {
+        "l2": 10.0,
+        "phase": 0.25,
+        "ipd": 0.5
+      }
+    }
+  }
+}

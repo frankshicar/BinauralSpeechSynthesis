@@ -25,7 +25,7 @@ parser = argparse.ArgumentParser(description='微調雙耳語音合成模型 (Fi
 # Data arguments
 parser.add_argument("--dataset_directory",
                     type=str,
-                    default="./dataset/trainset",
+                    default="./dataset/train",
                     help="訓練資料路徑 (path to the training data)")
 parser.add_argument("--artifacts_directory",
                     type=str,

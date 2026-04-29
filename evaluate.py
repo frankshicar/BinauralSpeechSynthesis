@@ -23,7 +23,7 @@ from src.alignment import find_alignment_offset, align_signals, diagnose_alignme
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset_directory",
                     type=str,
-                    default="./data/testset",
+                    default="./dataset/test_13angles",
                     help="path to the test data")
 parser.add_argument("--model_file",
                     type=str,

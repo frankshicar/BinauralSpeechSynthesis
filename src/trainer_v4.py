@@ -200,17 +200,34 @@ class TrainerV4:
         if self.start_epoch > 0:
             print(f"從 epoch {self.start_epoch + 1} 繼續")
         print(f"{'='*60}\n")
-        
+
+        prev_weights = None
+
         for epoch in range(self.start_epoch, self.config["epochs"]):
             # 獲取當前階段的 loss 權重
             loss_weights = self._get_loss_weights(epoch)
-            
-            # 顯示訓練階段
-            if epoch == 0 or self._get_loss_weights(epoch-1) != loss_weights:
+
+            # Stage 切換時重置 LR scheduler
+            if prev_weights is not None and prev_weights != loss_weights:
+                stage_switch_lr = self.config.get("stage_switch_lr", None)
+                if stage_switch_lr is not None:
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = stage_switch_lr
+                self.scheduler.best = float('inf')
+                self.scheduler.num_bad_epochs = 0
+                current_lr = self.optimizer.param_groups[0]['lr']
                 print(f"\n{'='*60}")
                 print(f"訓練階段切換 (Epoch {epoch+1})")
                 print(f"Loss 權重: {loss_weights}")
+                print(f"LR 重置為: {current_lr:.6f}")
                 print(f"{'='*60}\n")
+            elif epoch == 0:
+                print(f"\n{'='*60}")
+                print(f"訓練階段: Stage 1 (Epoch {epoch+1})")
+                print(f"Loss 權重: {loss_weights}")
+                print(f"{'='*60}\n")
+
+            prev_weights = loss_weights
             
             t_start = time.time()
             loss_stats = {}

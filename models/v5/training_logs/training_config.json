@@ -1,0 +1,52 @@
+{
+  "start_time": "2026-04-18 09:16:49",
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "epochs": 150,
+  "lr_scheduler": {
+    "type": "ReduceLROnPlateau",
+    "patience": 15,
+    "factor": 0.5,
+    "min_lr": 5e-06
+  },
+  "training_stages": {
+    "stage1": {
+      "epochs": [
+        0,
+        50
+      ],
+      "loss_weights": {
+        "l2": 3.0,
+        "phase": 0.1,
+        "ipd": 0.0
+      }
+    },
+    "stage2": {
+      "epochs": [
+        50,
+        110
+      ],
+      "loss_weights": {
+        "l2": 3.0,
+        "phase": 0.15,
+        "ipd": 0.3
+      }
+    },
+    "stage3": {
+      "epochs": [
+        110,
+        150
+      ],
+      "loss_weights": {
+        "l2": 2.0,
+        "phase": 0.2,
+        "ipd": 0.4
+      }
+    }
+  },
+  "mask_beginning": 1024,
+  "lambda_warp": 0.01,
+  "lambda_smooth": 0.001,
+  "num_gpus": 1,
+  "dataset_size": 65023
+}

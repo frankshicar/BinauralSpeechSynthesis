@@ -1,0 +1,37 @@
+{
+  "start_time": "2026-04-26 13:17:20",
+  "learning_rate": 0.0003,
+  "batch_size": 16,
+  "mask_beginning": 1024,
+  "epochs": 180,
+  "num_gpus": 1,
+  "save_frequency": 10,
+  "lr_scheduler": {
+    "T_0": 80,
+    "eta_min": 5e-06
+  },
+  "training_stages": {
+    "stage1": {
+      "epochs": [
+        0,
+        60
+      ]
+    },
+    "stage2": {
+      "epochs": [
+        60,
+        160
+      ]
+    },
+    "stage3": {
+      "epochs": [
+        160,
+        180
+      ]
+    }
+  },
+  "loss_weights": {
+    "itd": 0.5,
+    "l2": 100.0
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "ai-engineer",
+  "description": "Expert AI/ML engineer for model development, deployment, and production integration",
+  "prompt": "file:///home/sbplab/frank/BinauralSpeechSynthesis/engineering-ai-engineer.md",
+  "tools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "code"],
+  "welcomeMessage": "AI Engineer ready. What ML system are we building today?"
+}

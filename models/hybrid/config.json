@@ -1,0 +1,26 @@
+{
+  "batch_size": 2,
+  "learning_rate": 0.0003,
+  "sample_rate": 16000,
+  "n_fft": 1024,
+  "hop_size": 256,
+  "tf_channels": 64,
+  "tf_blocks": 4,
+  "num_epochs": 200,
+  "stage_boundaries": {
+    "stage1": [
+      0,
+      60
+    ],
+    "stage2": [
+      60,
+      160
+    ],
+    "stage3": [
+      160,
+      200
+    ]
+  },
+  "output_dir": "outputs_hybrid",
+  "save_interval": 10
+}

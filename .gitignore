@@ -1,22 +1,58 @@
-training_log.txt
+# Dataset and audio files
 dataset/
+dataset_original/
+*.wav
+*.mp3
+*.flac
+
+# Training outputs
 outputs/
 outputs_*/
 outputs_v*/
-pod.yaml
-dataset_original/
-eval_results/
 logs/
-.vscode/
-__pycache__/
-*.pyc
-*.wav
-*.log
-*.txt
+eval_results/
+geowarp_film/
+geowarp_film_v*/
+
+# Model checkpoints
 *.net
 *.pth
+*.ckpt
+*.pt
+
+# Logs
+*.log
+*.txt
+training_log.txt
 nohup.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# System
+.DS_Store
+Thumbs.db
+
+# Backup
+backup_original/
+*_backup/
+*.bak
+
+# Exceptions (keep these)
 !README.md
 !requirements.txt
-!docs/*.md
-!實驗記錄/*.md
+!docs/**/*.md
+!實驗記錄/**/*.md
+!scripts/*.sh
