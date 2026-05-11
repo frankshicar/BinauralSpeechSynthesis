@@ -11,7 +11,7 @@ import numpy as np
 import soundfile as sf
 import glob
 
-from src.models_geowarp_film_v4 import GeoWarpFiLMNet
+from src.models_geowarp_film_v6_4 import GeoWarpFiLMNet
 from src.losses import L2Loss, AmplitudeLoss, PhaseLoss
 from src.doa import gcc_phat_estimate
 

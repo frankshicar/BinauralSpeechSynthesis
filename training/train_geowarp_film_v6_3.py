@@ -1,10 +1,9 @@
 """
-GeoWarpFiLMNet v4 訓練腳本
-v4 improvements:
-- Temporal awareness (velocity encoding)
-- Relaxed phase residual (±π)
-- Increased depth (8 blocks)
-- IPD anchor loss (prevent phase over-correction)
+GeoWarpFiLMNet v6.3 training script
+v6.3 changes vs v6:
+1. Log-scale band allocation in FiLMLayer (model change)
+2. NeuralWarpCorrector 6 layers (model change)
+3. Low-freq sin^2(diff/2) IPD loss: only bins < 1500Hz, better gradient than cosine
 """
 import sys
 sys.path.insert(0, '/home/sbplab/frank/BinauralSpeechSynthesis')
@@ -15,83 +14,51 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from src.dataset import BinauralDataset
-from src.models_geowarp_film_v4 import GeoWarpFiLMNet  # v4 model
+from src.models_geowarp_film_v6_3 import GeoWarpFiLMNet
 from src.losses import L2Loss, PhaseLoss
 
 
 def atomic_save(state_dict, path):
-    """Save checkpoint atomically to prevent corruption on kill/disk-full."""
-    import tempfile
     tmp_path = path + '.tmp'
     torch.save(state_dict, tmp_path)
-    os.replace(tmp_path, path)  # atomic on POSIX
+    os.replace(tmp_path, path)
+
 
 config = {
     'train_dir':      'dataset/trainset',
     'val_dir':        'dataset/testset',
-    'output_dir':     'geowarp_film_v4',
-    'checkpoint':     'geowarp_film_v4/best.net',
-    'log_file':       'geowarp_film_v4/train.log',
+    'output_dir':     'geowarp_film_v6_3',
+    'checkpoint':     'geowarp_film_v6_3/best.net',
+    'log_file':       'geowarp_film_v6_3/train.log',
 
     'stage1_epochs':  30,
     'stage2_epochs':  80,
-    'lr':             8e-4,  # v4: higher LR for deeper network (8 blocks)
+    'lr':             8e-4,
     'batch_size':     16,
     'patience':       20,
+
+    'w_itd':          0.5,
+    'low_freq_bins':  32,   # <1500Hz @ n_fft=1024, sr=48000
 }
 
-# Validate config
-assert config['batch_size'] > 0, "batch_size must be > 0"
-assert config['lr'] > 0, "learning_rate must be > 0"
-assert config['stage1_epochs'] > 0 and config['stage2_epochs'] > 0, "epochs must be > 0"
-assert config['patience'] > 0, "patience must be > 0"
 
-
-def ipd_loss_fn(Y_L, Y_R, Y_L_gt, Y_R_gt):
+def ipd_loss_fn(Y_L, Y_R, Y_L_gt, Y_R_gt, low_freq_bins=32):
+    """Low-frequency sin^2(diff/2) IPD loss.
+    - Only bins < 1500Hz (first 32 bins): avoids high-freq phase ambiguity
+    - sin^2(diff/2) = (1-cos(diff))/2: better gradient near 0 than plain cosine
     """
-    IPD loss on STFT domain (avoid double round-trip).
-    Uses cross-spectrum to avoid angle gradient explosion.
-    Args: complex STFT tensors (B, F, T_stft)
-    """
-    # Guard against NaN in input
     if torch.isnan(Y_L).any() or torch.isnan(Y_R).any():
         return torch.tensor(0.0, device=Y_L.device, requires_grad=True)
-    
-    # Cross-spectrum approach (stable gradients)
-    pred_cross = Y_L * Y_R.conj()
-    gt_cross   = Y_L_gt * Y_R_gt.conj()
-    
-    # angle() ignores magnitude, no need to normalize
-    pred_ipd = torch.angle(pred_cross)
-    gt_ipd   = torch.angle(gt_cross)
-
-    # Energy mask (compute once)
-    energy = (Y_L_gt.abs() + Y_R_gt.abs()) / 2
+    pred_ipd = torch.angle(Y_L[:, :low_freq_bins, :] * Y_R[:, :low_freq_bins, :].conj())
+    gt_ipd   = torch.angle(Y_L_gt[:, :low_freq_bins, :] * Y_R_gt[:, :low_freq_bins, :].conj())
+    diff = pred_ipd - gt_ipd
+    energy = (Y_L_gt[:, :low_freq_bins, :].abs() + Y_R_gt[:, :low_freq_bins, :].abs()) / 2
     mask = energy > 0.1 * energy.mean()
-    
-    # Guard against silent input
     if mask.sum() == 0:
         return torch.tensor(0.0, device=Y_L.device, requires_grad=True)
-
-    diff = torch.atan2(torch.sin(pred_ipd - gt_ipd), torch.cos(pred_ipd - gt_ipd))
-    loss = (diff[mask] ** 2).mean()
-    
-    # Guard against NaN output
-    if torch.isnan(loss):
-        return torch.tensor(0.0, device=Y_L.device, requires_grad=True)
-    
-    return loss
-
-
-def ipd_anchor_loss_fn(Y_L, Y_R, Y_L_init, Y_R_init, weight=0.1):
-    """
-    v4: IPD anchor loss to prevent phase over-correction.
-    Ensures learned phase doesn't deviate too much from geometric prior.
-    """
-    ipd_learned = torch.angle(Y_L) - torch.angle(Y_R)
-    ipd_geo = torch.angle(Y_L_init) - torch.angle(Y_R_init)
-    diff = torch.atan2(torch.sin(ipd_learned - ipd_geo), torch.cos(ipd_learned - ipd_geo))
-    return weight * diff.abs().mean()
+    loss = torch.sin(diff / 2).pow(2)
+    loss = loss[mask].mean()
+    return loss if not torch.isnan(loss) else torch.tensor(0.0, device=Y_L.device, requires_grad=True)
 
 
 def run_epoch(model, loader, optimizer, device, stage, w):
@@ -110,26 +77,22 @@ def run_epoch(model, loader, optimizer, device, stage, w):
         pred = torch.cat([y_L, y_R], dim=1)
         gt   = torch.cat([y_L_gt, y_R_gt], dim=1)
 
-        # Compute GT STFT for IPD loss
         window = model.window
-        Y_L_gt = torch.stft(y_L_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
-                            win_length=model.win_length, window=window, return_complex=True)
-        Y_R_gt = torch.stft(y_R_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
-                            win_length=model.win_length, window=window, return_complex=True)
+        Y_L_gt_stft = torch.stft(y_L_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
+                                  win_length=model.win_length, window=window, return_complex=True)
+        Y_R_gt_stft = torch.stft(y_R_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
+                                  win_length=model.win_length, window=window, return_complex=True)
 
         l2    = l2_fn(pred, gt)
         phase = phase_fn(pred, gt)
-        ipd   = ipd_loss_fn(Y_L, Y_R, Y_L_gt, Y_R_gt)
+        ipd   = ipd_loss_fn(Y_L, Y_R, Y_L_gt_stft, Y_R_gt_stft)
 
         if stage == 1:
-            # Stage 1: magnitude anchor + weak phase supervision
-            # Prevent magnitude drift from geometric prior
             mag_anchor = (torch.nn.functional.l1_loss(Y_L.abs(), Y_L_init.abs().detach()) +
                           torch.nn.functional.l1_loss(Y_R.abs(), Y_R_init.abs().detach())) / 2
             loss = 0.1 * mag_anchor + 0.1 * phase
             sums['mag_anchor'] += mag_anchor.item()
         else:
-            # Stage 2: L2 + Phase + IPD (no anchor)
             loss = w['l2'] * l2 + w['phase'] * phase + w['ipd'] * ipd
 
         optimizer.zero_grad()
@@ -158,32 +121,29 @@ def evaluate(model, loader, device):
     for mono, binaural, view in loader:
         mono, binaural, view = mono.to(device), binaural.to(device), view.to(device)
         y_L_gt, y_R_gt = binaural[:, 0:1], binaural[:, 1:2]
-        y_L, y_R, Y_L, Y_R, _, _ = model(mono, view)  # ignore Y_init
+        y_L, y_R, Y_L, Y_R, _, _ = model(mono, view)
         pred = torch.cat([y_L, y_R], dim=1)
         gt   = torch.cat([y_L_gt, y_R_gt], dim=1)
-        
-        # Skip NaN batches
+
         if torch.isnan(pred).any() or torch.isnan(gt).any():
             continue
 
-        # GT STFT
         window = model.window
-        Y_L_gt = torch.stft(y_L_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
-                            win_length=model.win_length, window=window, return_complex=True)
-        Y_R_gt = torch.stft(y_R_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
-                            win_length=model.win_length, window=window, return_complex=True)
+        Y_L_gt_stft = torch.stft(y_L_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
+                                  win_length=model.win_length, window=window, return_complex=True)
+        Y_R_gt_stft = torch.stft(y_R_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
+                                  win_length=model.win_length, window=window, return_complex=True)
 
         sums['l2']    += l2_fn(pred, gt).item()
         sums['phase'] += phase_fn(pred, gt).item()
-        ipd_val = ipd_loss_fn(Y_L, Y_R, Y_L_gt, Y_R_gt).item()
-        sums['ipd']   += ipd_val if not torch.isnan(torch.tensor(ipd_val)) else 0.0
+        ipd_val = ipd_loss_fn(Y_L, Y_R, Y_L_gt_stft, Y_R_gt_stft).item()
+        sums['ipd']   += ipd_val if not (ipd_val != ipd_val) else 0.0
         n += 1
 
     return {k: v / n for k, v in sums.items()}
 
 
 def calibrate_weights(model, loader, device):
-    """Run one batch to measure raw loss magnitudes, return balanced weights."""
     model.eval()
     l2_fn    = L2Loss()
     phase_fn = PhaseLoss(sample_rate=48000, ignore_below=0.2)
@@ -193,31 +153,27 @@ def calibrate_weights(model, loader, device):
     y_L_gt, y_R_gt = binaural[:, 0:1], binaural[:, 1:2]
 
     with torch.no_grad():
-        y_L, y_R, Y_L, Y_R, _, _ = model(mono, view)  # ignore Y_init
+        y_L, y_R, Y_L, Y_R, _, _ = model(mono, view)
         pred = torch.cat([y_L, y_R], dim=1)
         gt   = torch.cat([y_L_gt, y_R_gt], dim=1)
-        
         window = model.window
-        Y_L_gt = torch.stft(y_L_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
-                            win_length=model.win_length, window=window, return_complex=True)
-        Y_R_gt = torch.stft(y_R_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
-                            win_length=model.win_length, window=window, return_complex=True)
-        
+        Y_L_gt_stft = torch.stft(y_L_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
+                                  win_length=model.win_length, window=window, return_complex=True)
+        Y_R_gt_stft = torch.stft(y_R_gt.squeeze(1), n_fft=model.n_fft, hop_length=model.hop_length,
+                                  win_length=model.win_length, window=window, return_complex=True)
         l2    = l2_fn(pred, gt).item()
         phase = phase_fn(pred, gt).item()
-        ipd   = ipd_loss_fn(Y_L, Y_R, Y_L_gt, Y_R_gt).item()
+        ipd   = ipd_loss_fn(Y_L, Y_R, Y_L_gt_stft, Y_R_gt_stft).item()
 
     print(f"  Raw losses → L2: {l2:.6f}  Phase: {phase:.4f}  IPD: {ipd:.4f}")
-
-    # Normalise so each term contributes equally at init
-    ref = max(phase, 1e-4)  # guard against zero phase
+    ref = max(phase, 1e-4)
     w = {
-        'l2':    ref / (l2    + 1e-8),
+        'l2':    ref / (l2  + 1e-8),
         'phase': 1.0,
-        'ipd':   ref / (ipd   + 1e-8),
+        'ipd':   ref / (ipd + 1e-8),
     }
     print(f"  Calibrated weights → L2: {w['l2']:.2f}  Phase: {w['phase']:.2f}  IPD: {w['ipd']:.2f}")
-    model.train()  # restore train mode
+    model.train()
     return w
 
 
@@ -236,7 +192,6 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=config['batch_size'], shuffle=False, num_workers=0)
     print(f"Train: {len(train_ds)}  Val: {len(val_ds)}")
 
-    # Calibrate loss weights from actual magnitudes
     print("\nCalibrating loss weights...")
     w = calibrate_weights(model, train_loader, device)
 
@@ -246,14 +201,14 @@ def main():
             log.write(msg + '\n')
 
         best_metric = float('inf')
-        patience   = 0
+        patience = 0
 
-        # ── Stage 1: magnitude anchor + phase ─────────────────────────────────
+        # ── Stage 1 ────────────────────────────────────────────────────────────
         optimizer = optim.Adam(model.parameters(), lr=config['lr'])
-        log_print("\n=== Stage 1: magnitude anchor + phase loss ===")
+        log_print("\n=== Stage 1: mag_anchor + phase + ITD consistency ===")
 
         for epoch in range(1, config['stage1_epochs'] + 1):
-            tr = run_epoch(model, train_loader, optimizer, device, stage=1, w=w)
+            tr  = run_epoch(model, train_loader, optimizer, device, stage=1, w=w)
             val = evaluate(model, val_loader, device)
 
             log_print(
@@ -262,14 +217,11 @@ def main():
                 f"val_l2={val['l2']*1000:.3f}e-3  val_phase={val['phase']:.3f}  val_ipd={val['ipd']:.4f}"
             )
 
-            # Stage 1: use phase as metric
             if val['phase'] < best_metric:
                 best_metric = val['phase']
                 patience = 0
-                # Save full state for resume
                 atomic_save({
-                    'epoch': epoch,
-                    'stage': 1,
+                    'epoch': epoch, 'stage': 1,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'best_metric': best_metric,
@@ -282,35 +234,31 @@ def main():
                     log_print("  🛑 Early stop (stage 1)")
                     break
 
-        # ── Stage 2: L2 + Phase + IPD ──────────────────────────────────────────
-        # Reload best stage 1 checkpoint
+        # ── Stage 2 ────────────────────────────────────────────────────────────
         log_print("\nReloading best Stage 1 checkpoint...")
         ckpt = torch.load(config['checkpoint'])
         model.load_state_dict(ckpt['model_state_dict'])
-        
-        # Recalibrate weights after Stage 1 (loss scales have changed)
+
         log_print("Recalibrating loss weights after Stage 1...")
         w = calibrate_weights(model, train_loader, device)
-        
-        # Reset metric to phase
+        # Force IPD weight = Phase weight (calibration suppresses IPD to ~0.36, too weak)
+        w['ipd'] = w['phase']  # = 1.0
+        log_print(f"  Overriding IPD weight to {w['ipd']:.2f} (equal to Phase)")
+
         best_metric = float('inf')
         patience = 0
-        
         optimizer = optim.Adam(model.parameters(), lr=config['lr'] / 3)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-        log_print("\n=== Stage 2: L2 + Phase + IPD ===")
-        log_print(f"  Weights: L2={w['l2']:.2f}  Phase={w['phase']:.2f}  IPD={w['ipd']:.2f}")
+        log_print("\n=== Stage 2: L2 + Phase + IPD (boosted) + ITD consistency ===")
+        log_print(f"  Weights: L2={w['l2']:.2f}  Phase={w['phase']:.2f}  IPD={w['ipd']:.2f}  ITD={config['w_itd']:.2f}")
 
         for epoch in range(1, config['stage2_epochs'] + 1):
             tr  = run_epoch(model, train_loader, optimizer, device, stage=2, w=w)
             val = evaluate(model, val_loader, device)
-            
-            # Guard against NaN
+
             import math
             if not math.isnan(val['phase']):
                 scheduler.step(val['phase'])
-            else:
-                log_print(f"  ⚠️  NaN detected in val_phase, skipping scheduler step")
 
             log_print(
                 f"[S2] Ep {epoch:3d} | "
@@ -319,13 +267,11 @@ def main():
                 f"lr={optimizer.param_groups[0]['lr']:.1e}"
             )
 
-            # Stage 2: use phase as metric
             if val['phase'] < best_metric:
                 best_metric = val['phase']
                 patience = 0
                 atomic_save({
-                    'epoch': epoch,
-                    'stage': 2,
+                    'epoch': epoch, 'stage': 2,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),

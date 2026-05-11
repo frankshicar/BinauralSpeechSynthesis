@@ -612,3 +612,59 @@ class WarpSmoothnessLoss(th.nn.Module):
         
         return self.lambda_smooth * smoothness_loss
 
+
+
+class ITDConsistencyLoss(th.nn.Module):
+    """
+    ITD Consistency Loss - 確保 model 輸出的 ITD 方向與 GeometricWarper 一致。
+
+    問題背景：
+    - GeometricWarper 建立了正確的 ITD（左右耳延遲差）
+    - 但 phase residual 可能把 ITD 抹掉（model ITD ≈ 0）
+    - 導致 GCC-PHAT 估角度失敗
+
+    做法：
+    - 計算 model 輸出 (Y_L, Y_R) 的 cross-correlation peak 位置
+    - 計算 GeoWarp 輸出 (Y_L_init, Y_R_init) 的 cross-correlation peak 位置
+    - 懲罰兩者的差異，讓 model 保留 GeoWarp 的 ITD 方向
+
+    使用 STFT cross-spectrum 的低頻相位斜率估計 ITD（可微分）。
+    """
+    def __init__(self, freq_bins_low=32):
+        """
+        Args:
+            freq_bins_low: 只用低頻 bins 估計 ITD（ITD 主要在低頻有效）
+        """
+        super().__init__()
+        self.freq_bins_low = freq_bins_low
+
+    def forward(self, Y_L, Y_R, Y_L_init, Y_R_init):
+        """
+        Args:
+            Y_L, Y_R: model 輸出的複數 STFT (B, F, T)
+            Y_L_init, Y_R_init: GeometricWarper 輸出的複數 STFT (B, F, T)
+        Returns:
+            scalar loss
+        """
+        K = self.freq_bins_low
+
+        # 低頻 cross-spectrum phase（可微分的 ITD 代理）
+        # cross(f) = Y_L(f) * conj(Y_R(f))，其相位斜率 ∝ ITD
+        pred_cross = Y_L[:, :K, :] * Y_R[:, :K, :].conj()   # (B, K, T)
+        geo_cross  = Y_L_init[:, :K, :] * Y_R_init[:, :K, :].conj()
+
+        # 用 angle 的 cos/sin 表示避免 wrap-around 問題
+        pred_phase = th.angle(pred_cross)   # (B, K, T)
+        geo_phase  = th.angle(geo_cross)
+
+        # 相位差（wrapped）
+        diff = th.atan2(th.sin(pred_phase - geo_phase),
+                        th.cos(pred_phase - geo_phase))
+
+        # 能量加權：只在 geo 有能量的地方計算
+        geo_mag = geo_cross.abs()
+        mask = geo_mag > 0.01 * geo_mag.mean()
+        if mask.sum() == 0:
+            return th.tensor(0.0, device=Y_L.device, requires_grad=True)
+
+        return (diff[mask] ** 2).mean()

@@ -1,47 +1,67 @@
-# 專案結構整理
+# Project Structure
 
-## 核心檔案
+Last organized: 2026-05-11
 
-### 模型定義
-- `src/models_hybrid.py` - HybridTFNet 架構（待改進為 IPD-only）
-- `src/models_dpatfnet.py` - DPATFNet 參考實現
-- `src/models_v2.py` - v8.3 模型（baseline）
+## Active Code
 
-### 訓練腳本
-- `train_hybrid_corrected.py` - HybridTFNet 訓練（當前版本）
-- `train_dpatfnet.py` - DPATFNet 訓練
-- `train_v8.py` - v8.3 訓練
+- `src/` - core Python modules, losses, datasets, model definitions, and shared
+  utilities.
+- `training/` - active training scripts. Current GeoWarpFiLM v6.4 entry point:
+  `training/train_geowarp_film_v6_4.py`.
+- `scripts/` - launchers and active operational diagnostics. Current v6.4
+  launcher: `scripts/start_train_geowarp_film_v6_4.sh`.
+- repo root `evaluate*.py` - evaluation entry points.
+- `tests/` - automated checks.
 
-### 啟動腳本
-- `start_train_hybrid.sh` - 啟動 HybridTFNet
-- `start_train_dpatfnet.sh` - 啟動 DPATFNet
-- `start_train_v8.sh` - 啟動 v8.3
+## Active Data And Models
 
-### 資料處理
-- `src/dataset.py` - 資料載入
-- `src/warping.py` - Time-domain warping
-- `src/losses.py` - Loss functions
+- `dataset/` - train/test data. `testset` is the Meta-provided test set; the
+  custom static set is under `dataset/test_static`.
+- `binaural_network_3blocks.net` - Meta pretrained 3-block model.
+- `geowarp_film_v6_4/` - active v6.4 run directory. This is intentionally kept
+  at the repo root while training scripts still write there.
+- `geowarp_film/` - legacy aggregate GeoWarpFiLM evaluation outputs. Kept in
+  place because existing comparison notes reference its subdirectories.
+- `geowarp_film_v6_release/` - packaged v6 release snapshot.
 
-## 實驗記錄
+## Documentation
 
-### 重要文件
-- `實驗記錄/20260427_HybridTFNet失敗分析與DPATFNet實現.md` - 完整實驗記錄
-- `ai/discussion_l2_loss.md` - Sub-agent 討論記錄
+- `docs/architecture/` - architecture notes grouped by research line:
+  `geowarp_film/`, `dpatfnet/`, `pgcn/`, `proposals/`, and
+  `infrastructure/`.
+- `docs/training/` - training guides.
+- `docs/analysis/` - historical cleanup and analysis reports.
+- `docs/research/` - research discussions and sub-agent notes.
+- `docs/reports/` - standalone reports and planning notes.
+- `docs/presentations/` - slide decks and presentation assets.
+- `docs/USAGE.md` - current command guide for training, monitoring, diagnostics,
+  and evaluation.
+- `paper/` - reference papers and manuscript notes.
+- `實驗記錄/` - chronological experiment records. Start with
+  `實驗記錄/實驗總表.md` and `實驗記錄/README.md`.
 
-## 待刪除/歸檔
+## Experiments
 
-### 舊版本（可歸檔）
-- `training/train_v*.py` - 舊版本訓練腳本
-- `src/trainer_v*.py` - 舊版本 trainer
-- `experiments/train_*.py` - 實驗性訓練腳本
+- `experiments/diagnostics/` - one-off debug and metric inspection scripts.
+- `experiments/data_tools/` - data alignment, angle, and transmitter-position
+  utilities.
+- `experiments/training/` - obsolete quick training prototypes.
+- `experiments/audio_tools/` - audio enhancement experiments.
 
-### 實驗工具（保留但不常用）
-- `experiments/*.py` - 各種診斷和實驗工具
-- `scripts/*.py` - 監控和可視化工具
+Scripts under `experiments/` are intentionally not canonical. Verify imports and
+paths before running them.
 
-## 下一步
+## Archive
 
-### 即將創建
-- `src/models_hybrid_ipd.py` - IPD-only 版本
-- `train_hybrid_ipd.py` - IPD-only 訓練腳本
-- `start_train_ipd.sh` - 啟動腳本
+- `archive/legacy_runs/` - old GeoWarpFiLM run directories from v4 to v6.3.
+- `archive/legacy_outputs/` - old generated audio and evaluation outputs.
+- `archive/original_meta_code/` - original backup of Meta code.
+
+Do not move active run directories into `archive/` while a training process is
+writing to them.
+
+## Root Directory Rule
+
+Keep the repo root for stable entry points, active outputs, README/license, and
+large canonical assets. New notes should go into `docs/` or `實驗記錄/`; new
+temporary scripts should go into the relevant `experiments/` subfolder.
